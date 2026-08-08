@@ -1,0 +1,6 @@
+Title: Healthcare And Insurance Context
+Source: Public health and policy summary
+
+Healthcare claims often involve nuanced tradeoffs between coverage, cost, wait times, and health outcomes. A statement that a policy helps everyone or hurts everyone is often too broad to be fully accurate.
+
+Evidence from health policy studies usually needs careful framing because different populations can experience different results under the same policy.
