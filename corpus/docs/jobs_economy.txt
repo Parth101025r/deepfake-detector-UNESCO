@@ -1,0 +1,6 @@
+Title: Jobs And Economic Claims
+Source: Bureau of Labor Statistics style summary
+
+Employment numbers and economic conditions can improve in one sector while weakening in another. Claims about job creation often require context including time window, labor force participation, revisions, and whether the figures are gross or net changes.
+
+Economists often describe jobs claims as partly true when they rely on a selective time frame or omit offsetting losses. Accurate interpretation depends on the underlying dataset and baseline.
