@@ -3,7 +3,7 @@ import os
 import re
 import numpy as np
 
-API_KEY = os.getenv("TAVILY_API_KEY", "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")
+API_KEY = os.getenv("TAVILY_API_KEY", "")
 
 client = None
 if API_KEY:

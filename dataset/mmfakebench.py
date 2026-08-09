@@ -1,11 +1,17 @@
 import json
-import os
+import random
+from pathlib import Path
+
 from PIL import Image
 from torch.utils.data import Dataset
 
 
+def normalize_image_path(image_path):
+    return str(image_path or "").replace("\\", "/").lstrip("/").strip()
+
+
 def derive_mmfakebench_label(item):
-    image_path = (item.get("image_path", "") or "").lower().lstrip("/\\")
+    image_path = normalize_image_path(item.get("image_path", "")).lower()
     if image_path.startswith("fake/"):
         return 1
     if image_path.startswith("real/"):
@@ -25,66 +31,129 @@ def derive_mmfakebench_label(item):
 
     return 0
 
+
+def load_mmfakebench_records(annotation_file):
+    annotation_path = Path(annotation_file)
+    if not annotation_path.exists():
+        print(f"Warning: Annotation file '{annotation_file}' not found. Using an empty dataset structure.")
+        return []
+
+    with annotation_path.open("r", encoding="utf-8") as handle:
+        try:
+            data = json.load(handle)
+        except json.JSONDecodeError:
+            handle.seek(0)
+            data = [json.loads(line) for line in handle if line.strip()]
+
+    for item in data:
+        item["image_path"] = normalize_image_path(item.get("image_path", ""))
+        item["text"] = str(item.get("text", "") or "").strip()
+
+    return data
+
+
+def resolve_image_path(image_path, image_dir=None, annotation_file=None):
+    normalized = normalize_image_path(image_path)
+    if not normalized:
+        return None
+
+    raw_path = Path(image_path)
+    if raw_path.is_absolute() and raw_path.exists():
+        return str(raw_path.resolve())
+
+    repo_root = Path(__file__).resolve().parents[1]
+    annotation_parent = Path(annotation_file).resolve().parent if annotation_file else repo_root / "dataset"
+    roots = []
+    if image_dir:
+        roots.append(Path(image_dir))
+    roots.extend(
+        [
+            annotation_parent / "images",
+            annotation_parent / "MMFakeBench_val",
+            annotation_parent / "MMFakeBench_test",
+            annotation_parent,
+            repo_root / "dataset" / "images",
+            repo_root / "dataset" / "MMFakeBench_val",
+            repo_root / "dataset" / "MMFakeBench_test",
+            repo_root,
+        ]
+    )
+
+    seen = set()
+    for root in roots:
+        root = Path(root)
+        key = str(root).lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        candidate = root / normalized
+        if candidate.exists():
+            return str(candidate.resolve())
+
+    return None
+
+
+def load_image_from_path(image_path):
+    if not image_path:
+        return None
+    try:
+        return Image.open(image_path).convert("RGB")
+    except Exception as exc:
+        print(f"Error loading image {image_path}: {exc}")
+        return None
+
+
 class MMFakeBenchDataset(Dataset):
     """
     MMFakeBench dataset loader.
-    Expects a JSON/JSONL file where each entry has:
-    - text: str
-    - image_path: str
-    - gt_answers / fake_cls: labels indicating fake or real.
+    Expects entries with:
+    - text
+    - image_path
+    - gt_answers
+    - fake_cls
     """
+
     def __init__(self, annotation_file, image_dir, transform=None, split_mode="all", split_ratio=0.8, seed=42):
         self.annotation_file = annotation_file
         self.image_dir = image_dir
         self.transform = transform
-        self.split_mode = split_mode  # 'all', 'train', 'val'
+        self.split_mode = split_mode
         self.split_ratio = split_ratio
         self.seed = seed
         self.data = self._load_data()
 
     def _load_data(self):
-        """
-        Load structured data. Implements 80/20 fallback split logic.
-        """
-        import random
-        data = []
-        if os.path.exists(self.annotation_file):
-            with open(self.annotation_file, 'r', encoding='utf-8') as f:
-                try:
-                    data = json.load(f)
-                except json.JSONDecodeError:
-                    f.seek(0)
-                    data = [json.loads(line) for line in f]
-            
-            # Implementation of the fallback train/val split strategy. We keep
-            # the split stratified so class imbalance does not get amplified by
-            # a random slice.
-            if self.split_mode != "all":
-                random.seed(self.seed)
-                real_items = [item for item in data if derive_mmfakebench_label(item) == 0]
-                fake_items = [item for item in data if derive_mmfakebench_label(item) == 1]
-                random.shuffle(real_items)
-                random.shuffle(fake_items)
+        data = load_mmfakebench_records(self.annotation_file)
 
-                real_split_idx = int(len(real_items) * self.split_ratio)
-                fake_split_idx = int(len(fake_items) * self.split_ratio)
+        if self.split_mode not in {"all", "train", "val"}:
+            raise ValueError("split_mode must be one of: all, train, val")
 
-                if self.split_mode == "train":
-                    print(f"Fallback assumption: using {self.split_ratio*100}% of {os.path.basename(self.annotation_file)} for training.")
-                    data = real_items[:real_split_idx] + fake_items[:fake_split_idx]
-                elif self.split_mode == "val":
-                    print(f"Fallback assumption: using {(1-self.split_ratio)*100}% of {os.path.basename(self.annotation_file)} for validation.")
-                    data = real_items[real_split_idx:] + fake_items[fake_split_idx:]
+        if self.split_mode == "all":
+            return data
 
-                random.shuffle(data)
+        random.seed(self.seed)
+        real_items = [item for item in data if derive_mmfakebench_label(item) == 0]
+        fake_items = [item for item in data if derive_mmfakebench_label(item) == 1]
+        random.shuffle(real_items)
+        random.shuffle(fake_items)
+
+        real_split_idx = int(len(real_items) * self.split_ratio)
+        fake_split_idx = int(len(fake_items) * self.split_ratio)
+
+        if self.split_mode == "train":
+            print(
+                f"Fallback assumption: using {self.split_ratio * 100:.0f}% of "
+                f"{Path(self.annotation_file).name} for training."
+            )
+            data = real_items[:real_split_idx] + fake_items[:fake_split_idx]
         else:
-            print(f"Warning: Annotation file '{self.annotation_file}' not found. Using an empty dataset structure.")
-        
-        # Ensure image_path doesn't start with leading slash to avoid path join issues
-        for item in data:
-            if 'image_path' in item and item['image_path'].startswith('/'):
-                item['image_path'] = item['image_path'][1:]
-                
+            print(
+                f"Fallback assumption: using {(1 - self.split_ratio) * 100:.0f}% of "
+                f"{Path(self.annotation_file).name} for validation."
+            )
+            data = real_items[real_split_idx:] + fake_items[fake_split_idx:]
+
+        random.shuffle(data)
         return data
 
     def __len__(self):
@@ -92,27 +161,28 @@ class MMFakeBenchDataset(Dataset):
 
     def __getitem__(self, idx):
         item = self.data[idx]
-        text = item.get("text", "")
-        img_filename = item.get("image_path", "")
-        
         label = derive_mmfakebench_label(item)
+        resolved_image_path = resolve_image_path(
+            item.get("image_path", ""),
+            image_dir=self.image_dir,
+            annotation_file=self.annotation_file,
+        )
+        image = load_image_from_path(resolved_image_path)
+        image_status = "loaded" if image is not None else "missing"
 
-        img_path = os.path.join(self.image_dir, img_filename)
-        image = None
-        if os.path.exists(img_path):
-            try:
-                image = Image.open(img_path).convert('RGB')
-                if self.transform:
-                    image = self.transform(image)
-            except Exception as e:
-                print(f"Error loading image {img_path}: {e}")
-        else:
-            # Handle missing images gracefully
-            pass
-            
+        if image is not None and self.transform:
+            image = self.transform(image)
+
         return {
-            "text": text,
+            "text": item.get("text", ""),
             "image": image,
             "label": label,
-            "image_path": img_path
+            "image_path": item.get("image_path", ""),
+            "resolved_image_path": resolved_image_path,
+            "image_available": image is not None,
+            "image_status": image_status,
+            "gt_answers": item.get("gt_answers"),
+            "fake_cls": item.get("fake_cls"),
+            "text_source": item.get("text_source"),
+            "image_source": item.get("image_source"),
         }

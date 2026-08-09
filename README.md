@@ -1,73 +1,222 @@
 # Multimodal Fake News Detection using RAG
 
-This project is a complete, working, end-to-end multimodal fake news detection system using **Text + Image input**, replacing the legacy text-only Logistic Regression baselines. The system uses a modern **Multimodal Baseline** (CLIP image-text encoder with a lightweight MLP classifier head) trained on the **MMFakeBench dataset**, alongside **real RAG functionality** (FAISS + SentenceTransformers) to inject evidential ground-truth into the claim verification pipeline. 
+This repository is now organized around one official Phase 4 demo pipeline:
 
-## 🗺️ Fallback Assumptions & Known Limitations
-- **No Official Train Split:** The MMFakeBench dataset provided does not possess an explicit `train.json`. We strictly documented this fallback: The dataset parsing automatically utilizes an **80/20 slice** of the validation set (`val.json`) for training and reserving the rest for validation. 
-- **Legacy Components:** Any previous Logistic Regression elements have been successfully fully deprecated.
+`MMFakeBench sample -> image resolution -> FAISS evidence retrieval -> CLIP multimodal classifier -> prediction + confidence + explanation + evidence`
 
-## 📁 Dataset Placement
+The project is no longer centered on text-only baselines. The main system uses:
+- MMFakeBench JSON records with `text`, `image_path`, `gt_answers`, and `fake_cls`
+- a CLIP-based image-text classifier
+- optional Google Fact Check Tools evidence for live claim verification
+- GDELT live news retrieval for general current-news evidence
+- Wikidata trusted knowledge for public-entity status claims
+- a local SentenceTransformer + FAISS evidence store
+- one shared prediction path for API, CLI, batch inference, and evaluation
 
-Ensure your dataset files are loaded as follows inside the `dataset/` directory:
+## Current Scope
+
+What works now:
+- multimodal sample loading from MMFakeBench
+- robust image lookup with placeholder fallback when images are missing
+- optional live fact-check evidence when `GOOGLE_FACT_CHECK_API_KEY` is configured
+- live news and trusted knowledge retrieval for broader claims
+- final verdicts are evidence-first; the trained classifier no longer decides the user-facing label when API evidence is missing or inconclusive
+- local FAISS evidence retrieval during prediction
+- single-sample inference
+- batch inference
+- evaluation with Accuracy, Precision, Recall, F1, Macro-F1, and confusion matrix
+- FastAPI backend and Streamlit demo using the same pipeline
+
+What is intentionally simple:
+- the classifier is a lightweight CLIP fusion baseline, not a large fine-tuned VLM
+- RAG is text-evidence retrieval that is injected into the text side of the multimodal classifier
+- training uses an 80/20 split of `MMFakeBench_val.json` because no official train split is provided here
+
+## Dataset Placement
+
+Place the official files here:
 - `dataset/MMFakeBench_val.json`
 - `dataset/MMFakeBench_test.json`
-- `dataset/images/` (Extracted images from the ZIP files placed here)
 
-## 🛠️ Environment Setup
+For images, either of these layouts is supported:
+- `dataset/images/fake/...`, `dataset/images/real/...`, `dataset/images/source/...`
+- extracted raw folders such as `dataset/MMFakeBench_val/...` and `dataset/MMFakeBench_test/...`
 
-Create an environment and install tools. Ensure you have the `sentence-transformers` and `faiss-cpu` dependencies for the Real RAG Retreiver:
+Recommended setup:
+1. Extract `MMFakeBench_val.zip`
+2. Extract `MMFakeBench_test.zip`
+3. Copy the extracted `fake`, `real`, and `source` folders under `dataset/images/`
+
+## Environment Setup
+
 ```bash
 python -m venv .venv
 .venv\Scripts\activate
 pip install -r requirements.txt
-pip install torch torchvision transformers pillow pandas scikit-learn faiss-cpu sentence-transformers python-multipart
 ```
 
-## 🚀 How to Run the System
+Optional live fact-check evidence:
 
-### 1. Build the Evidence Store (RAG)
-To use real RAG retrieval during inference or app usage, build the FAISS index from the dataset texts:
+```powershell
+$env:GOOGLE_FACT_CHECK_API_KEY="your_google_fact_check_api_key"
+```
+
+Optional Gemini grounded verifier:
+
+```powershell
+$env:GEMINI_API_KEY="your_gemini_api_key"
+```
+
+If terminal paste is difficult on Windows, create this local file instead:
+
+```text
+secrets/google_fact_check_api_key.txt
+```
+
+Put only the API key inside that file. The `secrets/` folder is ignored by git.
+
+For Gemini, use:
+
+```text
+secrets/gemini_api_key.txt
+```
+
+Useful optional settings:
+
+```powershell
+$env:FACT_CHECK_LANGUAGE_CODE="en"
+$env:FACT_CHECK_MAX_AGE_DAYS="365"
+```
+
+## Official Run Paths
+
+### 1. Build the Evidence Index
+
+Build the FAISS index from the validation split so retrieval is available during inference and demo usage:
+
 ```bash
 python retrieval/build_index.py --corpus_json dataset/MMFakeBench_val.json
 ```
 
-### 2. Training the Multimodal Baseline
-Run the training loop to fine-tune the CLIP fusion head using Cross-Entropy Loss:
+You can also build from multiple files if you want a larger local corpus:
+
+```bash
+python retrieval/build_index.py --corpus_json dataset/MMFakeBench_val.json dataset/MMFakeBench_test.json
+```
+
+Use the validation-only option if you want to avoid test leakage during evaluation.
+
+### 2. Train the Multimodal Classifier
+
+This uses an 80/20 split of `MMFakeBench_val.json` for train/validation:
+
 ```bash
 python training/train.py --annotation_file dataset/MMFakeBench_val.json --epochs 5 --batch_size 16
 ```
 
-### 3. Evaluation Script
-To calculate Accuracy, Precision, Recall, Macro-F1, and Confusion Matrices on the Test Split:
+Outputs:
+- best checkpoint: `checkpoints/model_best.pt`
+- training metrics: `checkpoints/training_metrics.json`
+
+### 3. Single Inference
+
 ```bash
-python evaluation/eval_mm.py --test_annotation dataset/MMFakeBench_test.json
+python infer_single.py --text "Jake Davis who has been released from a young offender institution first appeared in court in 2011" --image_path "dataset/images/real/bbc_val_50/BBC_val_0.png"
 ```
 
-### 4. Inference Scripts
+This prints JSON containing:
+- predicted label
+- confidence
+- class probabilities
+- explanation
+- retrieved evidence
+- image status
 
-**Single Inference** via CLI (`infer_single.py`):
+### 4. Batch Inference
+
 ```bash
-python infer_single.py --text "Donald trump is dead" --image_path "dataset/images/example.png"
+python infer_batch.py --annotation_file dataset/MMFakeBench_test.json --output_file outputs/batch_predictions.csv
 ```
-*(This retrieves FAISS evidence automatically and predicts a label!)*
 
-**Batch Inference** via CLI (`infer_batch.py`):
+Optional demo-friendly limit:
+
 ```bash
-python infer_batch.py --split test --annotation_file dataset/MMFakeBench_test.json
+python infer_batch.py --annotation_file dataset/MMFakeBench_test.json --limit 200
 ```
-*(Outputs predictions to `outputs/batch_predictions.csv`)*
 
-### 5. Local App / UI Demo
+### 5. Evaluation
 
-The User Interface of this demo application utilizes the **Stitch MCP Server** generated layouts to interface cleanly with FastAPI.
-The UI relies on the local API Backend to process the heavy CLIP inference operations cleanly.
+```bash
+python evaluation/eval_mm.py --annotation_file dataset/MMFakeBench_test.json
+```
 
-First, **Spin up the Backend API** in one activated terminal on port 8080 (avoids Windows port 8000 hyper-v restrictions):
+Outputs:
+- detailed predictions: `outputs/eval_predictions.csv`
+- metrics summary: `outputs/eval_metrics.json`
+
+Metrics include:
+- Accuracy
+- Precision
+- Recall
+- F1
+- Macro-F1
+- confusion matrix
+
+Optional faster smoke-test:
+
+```bash
+python evaluation/eval_mm.py --annotation_file dataset/MMFakeBench_test.json --limit 200
+```
+
+### 6. Demo Backend
+
 ```bash
 uvicorn backend.main:app --reload --port 8080
 ```
 
-Then, **Run the Streamlit multimodal demo natively** in a separate activated terminal. Bypassing global Anaconda path collisions by triggering via python module logic:
+Health check:
+
+```bash
+http://127.0.0.1:8080/health
+```
+
+### 7. Streamlit Demo
+
+In a second terminal:
+
 ```bash
 python -m streamlit run frontend/app.py
 ```
+
+The demo shows:
+- input claim
+- optional image
+- predicted class
+- confidence
+- explanation
+- live fact-check, live news, trusted knowledge, and/or local FAISS evidence
+- image fallback status
+
+## Main Files
+
+Official main path:
+- `dataset/mmfakebench.py`
+- `models/multimodal_classifier.py`
+- `retrieval/build_index.py`
+- `retrieval/rag_retriever.py`
+- `backend/pipeline.py`
+- `backend/main.py`
+- `infer_single.py`
+- `infer_batch.py`
+- `evaluation/eval_mm.py`
+- `training/train.py`
+- `frontend/app.py`
+
+## Limitations
+
+- Live fact-checking is optional and requires `GOOGLE_FACT_CHECK_API_KEY`; without it, the system falls back to the local FAISS evidence store.
+- A missing fact-check or news result is not treated as proof that a claim is true or false; the system can return `Unverified` instead of guessing.
+- The CLIP classifier is kept as a secondary project signal, but final demo labels are controlled by external evidence APIs.
+- The RAG stage retrieves text evidence only. Image evidence is still handled through the CLIP image encoder rather than a separate image retriever.
+- Appending evidence to CLIP text input is a practical baseline, not full multimodal cross-attention RAG fusion.
+- Full test-set evaluation can be slow on a laptop because retrieval and multimodal inference run sample by sample through the unified pipeline.
